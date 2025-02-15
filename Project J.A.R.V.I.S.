@@ -14,23 +14,22 @@ from typing import Dict, Optional, Callable
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 
-# Sabitler
-PROJECT_NAME = "Project J.AR.V.I.S."
-PREFERENCES_FILE = "preferences.json"
-HISTORY_FILE = "history.json"
-MAX_HISTORY_LENGTH = 20
-LOG_FILE_SIZE = 1e6
-LOG_BACKUP_COUNT = 3
-DEFAULT_THINKING_DELAY = 2.0
-MAX_THINKING_DELAY = 10.0
+# IMPORTANT:
+# • Ensure this file has a .py extension.
+# • Set up a pyproject.toml file for project configuration.
+# • Consider splitting your code into multiple modules.
+# • Consider extracting large data structures (such as model configurations) into external files.
+# • All comments and messages in this file are in English.
 
-# SECRET_KEY, ortam değişkeninden okunuyor; tanımlı değilse hata veriliyor.
+PROJECT_NAME = "Project J.AR.V.I.S."
+
+# SECRET_KEY is read from the environment variable; if not defined, an error is raised.
 SECRET_KEY = os.getenv('AI_SECRET_KEY')
 if not SECRET_KEY:
-    raise ValueError("AI_SECRET_KEY ortam değişkeni tanımlı değil!")
+    raise ValueError("AI_SECRET_KEY environment variable is not defined!")
 SECRET_KEY = SECRET_KEY.encode()
 
-# Model Yapısı
+# Model Structure
 @dataclass
 class AIModel:
     name: str
@@ -38,54 +37,59 @@ class AIModel:
     model: Optional[object] = None
     processor: Optional[Callable] = None
     config: Dict = field(default_factory=dict)
-    active: bool = False          # Manuel olarak aktif/pasif durumu
-    always_active: bool = False   # Her zaman aktif olması gereken modeller
-    thinking_enabled: bool = False  # Cevap üretmeden önce düşünme modu
-    thinking_delay: float = DEFAULT_THINKING_DELAY     # Düşünme gecikmesi (saniye cinsinden)
+    active: bool = False          # Manually set active/passive state
+    always_active: bool = False   # Models that must always be active
+    thinking_enabled: bool = False  # Enable thinking mode before generating response
+    thinking_delay: float = 2.0     # Thinking delay in seconds
 
-# Ana Yapay Zeka Sistemi
+# Main AI System
 class LocalAISystem:
     def __init__(self, quantization_bits: int = 8, temperature: float = 0.7):
         """
-        :param quantization_bits: 8 veya 4 (CUDA destekliyorsa ilgili quantization uygulanır)
-        :param temperature: Modelin yanıt üretiminde kullanılacak sıcaklık değeri.
+        :param quantization_bits: 8 or 4 (if CUDA is supported, the corresponding quantization is applied)
+        :param temperature: Temperature setting used for model's response generation.
         """
         self.logger = self._setup_logging()
-        self.logger.info(f"{PROJECT_NAME} başlatıldı.")
+        self.logger.info(f"{PROJECT_NAME} started.")
         self.quantization_bits = quantization_bits
         self.temperature = temperature
         self.models = self._initialize_models()
-        # Processor atanması yapılmamış modellere varsayılan işlemci ataması
+
+        # Assign default processor to models without one assigned
         for model in self.models.values():
             if model.processor is None:
                 model.processor = self._default_processor
-        self.dialogue_history = deque(maxlen=MAX_HISTORY_LENGTH)  # Son 20 konuşmayı sakla
-        self.user_preferences = self._load_preferences()  # Şifreli tercihler
-        # Preferences içinden dinamik banned_words ve censorship_level yükleniyor
+        self.dialogue_history = deque(maxlen=20)  # Store last 20 conversations
+        self.user_preferences = self._load_preferences()  # Encrypted preferences
+
+        # Load dynamic banned_words and censorship_level from preferences
         self.banned_words = self.user_preferences.get("banned_words", ["badword", "worseword"])
         self.censorship_level = self.user_preferences.get("censorship_level", 0)
-        self.load_models()  # Modelleri yükle
-        # Temel modelin (mistral_7b) yüklendiğinden emin olun
-        if "mistral_7b" not in self.models or not self.models["mistral_7b"].model:
-            raise RuntimeError("Temel model (mistral_7b) yüklenemedi! Sistem başlatılamıyor.")
 
-    # Loglama Ayarları
+        # Set up command handlers for a better pattern than cascading if statements
+        self.command_handlers = {
+            "activate model": self._handle_activate_model,
+            "deactivate model": self._handle_deactivate_model,
+            "set temperature": self._handle_set_temperature,
+            "set thinking_delay": self._handle_set_thinking_delay,
+            "toggle thinking": self._handle_toggle_thinking,
+            "set censorship": self._handle_set_censorship,
+        }
+
     def _setup_logging(self) -> logging.Logger:
         logger = logging.getLogger("LocalAISystem")
-        handler = RotatingFileHandler("ai.log", maxBytes=LOG_FILE_SIZE, backupCount=LOG_BACKUP_COUNT)
+        handler = RotatingFileHandler("ai.log", maxBytes=1e6, backupCount=3)
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
         return logger
 
-    # Varsayılan İşlemci
     def _default_processor(self, model: AIModel, input_data):
-        raise NotImplementedError(f"{model.name} için işlemci tanımlı değil!")
+        raise NotImplementedError(f"No processor defined for {model.name}!")
 
-    # Modelleri Başlatma
     def _initialize_models(self) -> Dict[str, AIModel]:
-        # Metin modelleri için thinking_delay = 30 saniye, audio modelleri için thinking_delay = 20 saniye
+        # For text models, thinking_delay = 30 seconds; for audio models, 20 seconds
         return {
             "mistral_7b": AIModel(
                 name="Mistral 7B",
@@ -304,7 +308,6 @@ class LocalAISystem:
             )
         }
 
-    # Modelleri Yükleme
     def load_models(self):
         if torch.cuda.is_available():
             dtype = torch.float16
@@ -323,8 +326,6 @@ class LocalAISystem:
             dtype = None
             device_map = None
             quantization_config = {}
-
-        essential_model_loaded = False
 
         for model_id, model in self.models.items():
             try:
@@ -347,83 +348,75 @@ class LocalAISystem:
                         model.processor = self._process_text
 
                 if not model.model:
-                    self.logger.error(f"{model.name} modeli doğru yüklenemedi. Bu model kullanılmayacak.")
+                    self.logger.error(f"{model.name} model could not be loaded correctly. This model will not be used.")
                     model.active = False
                     model.always_active = False
                     continue
 
-                self.logger.info(f"Model yüklendi: {model.name}")
-                if model_id == "mistral_7b":
-                    essential_model_loaded = True
+                self.logger.info(f"Model loaded: {model.name}")
             except Exception as e:
-                self.logger.exception(f"{model.name} yüklenemedi: {str(e)}")
+                self.logger.error(f"{model.name} could not be loaded: {str(e)}")
                 model.active = False
                 model.always_active = False
 
-        if not essential_model_loaded:
-            raise RuntimeError("Temel model (mistral_7b) yüklenemedi! Sistem başlatılamıyor.")
-
-    # Şifreli Tercih Yükleme
-    def _load_preferences(self) -> Dict:
-        file_path = Path(PREFERENCES_FILE)
+    def _load_preferences(self, filename="preferences.json") -> Dict:
+        file_path = Path(filename)
         if not file_path.is_file():
-            self.logger.warning(f"{PREFERENCES_FILE} bulunamadı!")
-            return self._create_default_preferences()
+            self.logger.warning(f"{filename} not found!")
+            return {
+                "frequently_used": [],
+                "personal_info": {},
+                "data_saving_enabled": True,
+                "custom_data": {},
+                "reasoning_enabled": True,
+                "banned_words": ["badword", "worseword"],
+                "censorship_level": 0
+            }
         try:
             with file_path.open("rb") as f:
                 encrypted_data = f.read()
-                decrypted = Fernet(SECRET_KEY).decrypt(encrypted_data)
-                return json.loads(decrypted.decode())
+            decrypted = Fernet(SECRET_KEY).decrypt(encrypted_data)
+            return json.loads(decrypted.decode())
         except (json.JSONDecodeError, Exception) as e:
-            self.logger.error(f"Tercih dosyası geçersiz JSON formatında veya deşifre edilemedi: {str(e)}")
-            return self._create_default_preferences()
+            self.logger.error(f"Preference file has invalid JSON format or could not be decrypted: {str(e)}")
+            return {
+                "frequently_used": [],
+                "personal_info": {},
+                "data_saving_enabled": True,
+                "custom_data": {},
+                "reasoning_enabled": True,
+                "banned_words": ["badword", "worseword"],
+                "censorship_level": 0
+            }
 
-    def _create_default_preferences(self) -> Dict:
-        default_prefs = {
-            "frequently_used": [],
-            "personal_info": {},
-            "data_saving_enabled": True,
-            "custom_data": {},
-            "reasoning_enabled": True,
-            "banned_words": ["badword", "worseword"],
-            "censorship_level": 0
-        }
-        self.user_preferences = default_prefs
-        return default_prefs
-
-    # Şifreli Tercih Kaydetme
-    def _save_preferences(self, filename=PREFERENCES_FILE):
+    def _save_preferences(self, filename="preferences.json"):
         encrypted = Fernet(SECRET_KEY).encrypt(
             json.dumps(self.user_preferences).encode()
         )
         with open(filename, "wb") as f:
             f.write(encrypted)
 
-    # Hafıza Yönetimi
     def remember(self, text: str) -> str:
         text = text[len("remember that"):].strip()
         if ' is ' not in text:
-            return "Hatalı format. 'remember that [anahtar] is [değer]' şeklinde girin."
+            return "Incorrect format. Please use 'remember that [key] is [value]'."
         key, value = text.split(' is ', 1)
         self.user_preferences["custom_data"][key.strip()] = value.strip()
         self._save_preferences()
-        return f"'{key.strip()}' kaydedildi: {value.strip()}"
+        return f"'{key.strip()}' saved: {value.strip()}"
 
-    # Konuşma Geçmişini Kaydetme
-    def save_history(self, filename=HISTORY_FILE):
+    def save_history(self, filename="history.json"):
         with open(filename, "w") as f:
             json.dump(list(self.dialogue_history), f)
 
-    # Konuşma Geçmişini Yükleme
-    def load_history(self, filename=HISTORY_FILE):
+    def load_history(self, filename="history.json"):
         try:
             with open(filename, "r") as f:
-                self.dialogue_history = deque(json.load(f), maxlen=MAX_HISTORY_LENGTH)
+                self.dialogue_history = deque(json.load(f), maxlen=20)
         except FileNotFoundError:
-            self.logger.warning("History dosyası bulunamadı, boş bir geçmişle başlanıyor.")
-            self.dialogue_history = deque(maxlen=MAX_HISTORY_LENGTH)
+            self.logger.warning("History file not found, starting with empty history.")
+            self.dialogue_history = deque(maxlen=20)
 
-    # Sansür Uygulama Fonksiyonu
     def apply_censorship(self, text: str) -> str:
         if self.censorship_level <= 0:
             return text
@@ -433,10 +426,9 @@ class LocalAISystem:
             censored_text = re.sub(re.escape(word), replacement, censored_text, flags=re.IGNORECASE)
         return censored_text
 
-    # Girdiyi İşleme
     def process_input(self, input_text: str) -> str:
         if not input_text.strip():
-            return "Boş giriş yapılamaz."
+            return "Empty input is not allowed."
         original_input = input_text.strip()
         lower_input = original_input.lower()
         try:
@@ -447,105 +439,36 @@ class LocalAISystem:
             elif lower_input.startswith("sentiment:"):
                 text = original_input[len("sentiment:"):].strip()
                 return self.models["sentiment"].processor(self.models["sentiment"], text)
-            elif lower_input.startswith("activate model"):
-                parts = original_input.split()
-                if len(parts) >= 3:
-                    model_key = parts[2]
-                    if model_key in self.models:
-                        if self.models[model_key].always_active:
-                            return f"{self.models[model_key].name} zaten her zaman aktif."
-                        self.models[model_key].active = True
-                        return f"{self.models[model_key].name} aktive edildi."
-                    else:
-                        return "Model bulunamadı."
-                else:
-                    return "Lütfen 'activate model [model_adi]' şeklinde girin."
-            elif lower_input.startswith("deactivate model"):
-                parts = original_input.split()
-                if len(parts) >= 3:
-                    model_key = parts[2]
-                    if model_key in self.models:
-                        if self.models[model_key].always_active:
-                            return f"{self.models[model_key].name} her zaman aktif olduğu için devre dışı bırakılamaz."
-                        self.models[model_key].active = False
-                        return f"{self.models[model_key].name} devre dışı bırakıldı."
-                    else:
-                        return "Model bulunamadı."
-                else:
-                    return "Lütfen 'deactivate model [model_adi]' şeklinde girin."
-            elif lower_input.startswith("set temperature"):
-                parts = original_input.split()
-                try:
-                    new_temp = float(parts[-1])
-                    self.temperature = new_temp
-                    return f"Temperature ayarı {new_temp} olarak güncellendi."
-                except ValueError:
-                    return "Geçerli bir sayı giriniz."
-            elif lower_input.startswith("set thinking_delay"):
-                parts = original_input.split()
-                if len(parts) >= 4:
-                    model_key = parts[2]
-                    try:
-                        new_delay = float(parts[3])
-                    except ValueError:
-                        return "Geçerli bir sayı giriniz."
-                    if new_delay < 0 or new_delay > MAX_THINKING_DELAY:
-                        return f"Thinking delay 0 ile {MAX_THINKING_DELAY} saniye arasında olmalıdır."
-                    if model_key in self.models:
-                        self.models[model_key].thinking_delay = new_delay
-                        return f"{self.models[model_key].name} için thinking_delay ayarı {new_delay} saniye olarak güncellendi."
-                    else:
-                        return "Model bulunamadı."
-                else:
-                    return "Lütfen 'set thinking_delay [model_adi] [değer]' şeklinde girin."
-            elif lower_input.startswith("toggle thinking"):
-                parts = original_input.split()
-                if len(parts) >= 3:
-                    model_key = parts[2]
-                    if model_key in self.models:
-                        self.models[model_key].thinking_enabled = not self.models[model_key].thinking_enabled
-                        status = "açık" if self.models[model_key].thinking_enabled else "kapalı"
-                        return f"{self.models[model_key].name} için düşünme modu {status} hale getirildi."
-                    else:
-                        return "Model bulunamadı."
-                else:
-                    return "Lütfen 'toggle thinking [model_adi]' şeklinde girin."
-            elif lower_input.startswith("set censorship"):
-                parts = original_input.split()
-                if len(parts) >= 3:
-                    try:
-                        new_censorship = int(parts[2])
-                    except ValueError:
-                        return "Geçerli bir sayı giriniz."
-                    self.censorship_level = new_censorship
-                    return f"Censorship seviyesi {new_censorship} olarak ayarlandı."
-                else:
-                    return "Lütfen 'set censorship [değer]' şeklinde girin."
             else:
+                # Use command handlers for a better pattern than cascading if statements
+                for command, handler in self.command_handlers.items():
+                    if lower_input.startswith(command):
+                        return handler(original_input)
+                # Default: aggregate responses from active text models
                 aggregated = ""
                 for model_id, model in self.models.items():
                     if model.type != "audio" and (model.always_active or model.active):
                         try:
                             resp = model.processor(model, original_input)
-                            aggregated += f"{model.name} yanıtı: {resp}\n"
+                            aggregated += f"{model.name} response: {resp}\n"
                         except Exception as e:
-                            self.logger.exception(f"{model.name} işleme hatası:")
-                            aggregated += f"{model.name} yanıtı: Hata oluştu.\n"
+                            self.logger.exception(f"{model.name} processing error:")
+                            aggregated += f"{model.name} response: An error occurred.\n"
                 unified_prompt = (
-                    "Aşağıdaki farklı yapay zeka sistemlerinden gelen bilgileri tek, tutarlı ve anlaşılır bir cevap "
-                    "halinde sentezle:\n\n" + aggregated + "\nLütfen tek bir cevap ver."
+                    "Synthesize a single, coherent, and understandable answer from the responses of the following AI systems:\n\n"
+                    + aggregated +
+                    "\nPlease provide a single answer."
                 )
                 unified_response = self.models["mistral_7b"].processor(self.models["mistral_7b"], unified_prompt)
                 unified_response = self.apply_censorship(unified_response)
-                self.dialogue_history.append(f"Monica sentezleme prompt: {unified_prompt}")
-                self.dialogue_history.append(f"Monica yanıtı: {unified_response}")
+                self.dialogue_history.append(f"Monica synthesis prompt: {unified_prompt}")
+                self.dialogue_history.append(f"Monica response: {unified_response}")
                 self.save_history()
                 return unified_response
         except Exception as e:
-            self.logger.exception("Kritik hata oluştu:")
-            return f"Sistem hatası: {str(e)} - Lütfen yöneticiye bildirin."
+            self.logger.exception("A critical error occurred:")
+            return f"System error: {str(e)} - Please contact the administrator."
 
-    # Model Yönlendirme
     def _route_to_model(self, model_key: str, prompt: str) -> str:
         if model_key in self.models:
             response = self.models[model_key].processor(self.models[model_key], prompt)
@@ -553,14 +476,13 @@ class LocalAISystem:
             self.dialogue_history.append(response)
             self.save_history()
             return response
-        return "Model bulunamadı."
+        return "Model not found."
 
-    # Metin İşleme
     def _process_text(self, model: AIModel, input_text: str) -> str:
         if model.thinking_enabled:
-            self.logger.info(f"{model.name} - Düşünüyorum... Bu işlem {model.thinking_delay} saniye sürecek.")
+            self.logger.info(f"{model.name} - Thinking... This will take {model.thinking_delay} seconds.")
             asyncio.run(asyncio.sleep(model.thinking_delay))
-            self.logger.info(f"{model.name} - Cevap hazırlanıyor...")
+            self.logger.info(f"{model.name} - Preparing response...")
         try:
             with torch.inference_mode():
                 generated = model.model(
@@ -574,53 +496,135 @@ class LocalAISystem:
             if generated and isinstance(generated, list) and 'generated_text' in generated[0]:
                 return generated[0]['generated_text']
             else:
-                self.logger.error(f"{model.name} beklenmeyen çıktı formatı: {generated}")
-                return "Cevap oluşturulamadı."
+                self.logger.error(f"{model.name} returned unexpected format: {generated}")
+                return "Response could not be generated."
         except Exception as e:
-            self.logger.exception("Metin işleme hatası:")
-            return "Bir hata oluştu."
+            self.logger.exception("Text processing error:")
+            return "An error occurred."
 
-    # Ses İşleme
     def _process_audio(self, model: AIModel, file_path: str) -> str:
         if not Path(file_path).exists():
-            return "Dosya bulunamadı."
+            return "File not found."
         try:
             result = model.model.transcribe(file_path)
             return result["text"]
         except Exception as e:
-            self.logger.exception("Ses işleme hatası:")
-            return "Ses dosyası işlenemedi."
+            self.logger.exception("Audio processing error:")
+            return "Audio file could not be processed."
 
-    # Duygu Analizi İşleme
     def _process_sentiment(self, model: AIModel, text: str) -> str:
         try:
             result = model.model(text)
             if result and isinstance(result, list) and 'label' in result[0]:
-                return f"Duygu: {result[0]['label']} (Puan: {result[0]['score']:.2f})"
+                return f"Sentiment: {result[0]['label']} (Score: {result[0]['score']:.2f})"
             else:
-                self.logger.error(f"{model.name} beklenmeyen çıktı formatı: {result}")
-                return "Duygu analizi başarısız."
+                self.logger.error(f"{model.name} returned unexpected format: {result}")
+                return "Sentiment analysis failed."
         except Exception as e:
-            self.logger.exception("Duygu analizi hatası:")
-            return "Duygu analizi başarısız."
+            self.logger.exception("Sentiment analysis error:")
+            return "Sentiment analysis failed."
 
-# Ana Program
+    # Command handler methods for refactored command pattern
+    def _handle_activate_model(self, input_text: str) -> str:
+        parts = input_text.split()
+        if len(parts) >= 3:
+            model_key = parts[2]
+            if model_key in self.models:
+                if self.models[model_key].always_active:
+                    return f"{self.models[model_key].name} is already always active."
+                self.models[model_key].active = True
+                return f"{self.models[model_key].name} has been activated."
+            else:
+                return "Model not found."
+        else:
+            return "Please enter 'activate model [model_name]'."
+
+    def _handle_deactivate_model(self, input_text: str) -> str:
+        parts = input_text.split()
+        if len(parts) >= 3:
+            model_key = parts[2]
+            if model_key in self.models:
+                if self.models[model_key].always_active:
+                    return f"{self.models[model_key].name} cannot be deactivated because it is always active."
+                self.models[model_key].active = False
+                return f"{self.models[model_key].name} has been deactivated."
+            else:
+                return "Model not found."
+        else:
+            return "Please enter 'deactivate model [model_name]'."
+
+    def _handle_set_temperature(self, input_text: str) -> str:
+        parts = input_text.split()
+        try:
+            new_temp = float(parts[-1])
+            self.temperature = new_temp
+            return f"Temperature setting updated to {new_temp}."
+        except ValueError:
+            return "Please enter a valid number."
+
+    def _handle_set_thinking_delay(self, input_text: str) -> str:
+        parts = input_text.split()
+        if len(parts) >= 4:
+            model_key = parts[2]
+            try:
+                new_delay = float(parts[3])
+            except ValueError:
+                return "Please enter a valid number."
+            if new_delay < 0 or new_delay > 10:
+                return "Thinking delay must be between 0 and 10 seconds."
+            if model_key in self.models:
+                self.models[model_key].thinking_delay = new_delay
+                return f"Thinking delay for {self.models[model_key].name} updated to {new_delay} seconds."
+            else:
+                return "Model not found."
+        else:
+            return "Please enter 'set thinking_delay [model_name] [value]'."
+
+    def _handle_toggle_thinking(self, input_text: str) -> str:
+        parts = input_text.split()
+        if len(parts) >= 3:
+            model_key = parts[2]
+            if model_key in self.models:
+                self.models[model_key].thinking_enabled = not self.models[model_key].thinking_enabled
+                status = "enabled" if self.models[model_key].thinking_enabled else "disabled"
+                return f"Thinking mode for {self.models[model_key].name} has been {status}."
+            else:
+                return "Model not found."
+        else:
+            return "Please enter 'toggle thinking [model_name]'."
+
+    def _handle_set_censorship(self, input_text: str) -> str:
+        parts = input_text.split()
+        if len(parts) >= 3:
+            try:
+                new_censorship = int(parts[2])
+            except ValueError:
+                return "Please enter a valid number."
+            self.censorship_level = new_censorship
+            return f"Censorship level updated to {new_censorship}."
+        else:
+            return "Please enter 'set censorship [value]'."
+
+# Main program
 def main():
+    # Ensure the file has a .py extension and set up a pyproject.toml for project configuration.
+    # Consider splitting the code into multiple modules and extracting large data structures into external files.
     system = LocalAISystem(quantization_bits=8, temperature=0.7)
+    system.load_models()
     system.load_history()
 
-    print(f"{PROJECT_NAME} - Komutlar:")
-    print("- Ses dosyası: 'file.wav' veya 'file.mp3'")
-    print("- Duygu analizi: 'sentiment: <metin>'")
-    print("- Bellek kaydı: 'remember that [bilgi] is [değer]'")
-    print("- Model aktivasyonu: 'activate model [model_adi]'")
-    print("- Model devre dışı bırakma: 'deactivate model [model_adi]'")
-    print("- Sıcaklık ayarı: 'set temperature [değer]'")
-    print("- Thinking delay ayarı: 'set thinking_delay [model_adi] [değer]'")
-    print("- Toggle thinking: 'toggle thinking [model_adi]'")
-    print("- Sansür ayarı: 'set censorship [değer]'")
-    print("- Diğer tüm metin sorguları, otomatik olarak Monica tarzında sentezlenmiş cevapla yanıtlanır.")
-    print("- Çıkış: 'exit'")
+    print(f"{PROJECT_NAME} - Commands:")
+    print("- Audio file: 'file.wav' or 'file.mp3'")
+    print("- Sentiment analysis: 'sentiment: <text>'")
+    print("- Memory record: 'remember that [info] is [value]'")
+    print("- Activate model: 'activate model [model_name]'")
+    print("- Deactivate model: 'deactivate model [model_name]'")
+    print("- Set temperature: 'set temperature [value]'")
+    print("- Set thinking delay: 'set thinking_delay [model_name] [value]'")
+    print("- Toggle thinking: 'toggle thinking [model_name]'")
+    print("- Set censorship: 'set censorship [value]'")
+    print("- All other text queries will be automatically answered with a synthesized response in the style of Monica.")
+    print("- Exit: 'exit'")
 
     while True:
         user_input = input(">> ")
@@ -628,7 +632,7 @@ def main():
             system.save_history()
             break
         result = system.process_input(user_input)
-        print(f"\nYanıt: {result}\n")
+        print(f"\nResponse: {result}\n")
 
 if __name__ == "__main__":
     main()
